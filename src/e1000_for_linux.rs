@@ -1,9 +1,12 @@
 //! Rust e1000 network device.
 #![allow(unused)]
 
+use core::convert::AsRef;
+use core::iter::{IntoIterator, Iterator};
 use core::slice::from_raw_parts_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use kernel::prelude::*;
+// use kernel::sync::spinlock;
 use kernel::{
     bindings, c_str, define_pci_id_table, device, dma, driver,
     file::{self, File},
@@ -76,8 +79,42 @@ module! {
 struct E1000Driver;
 
 impl E1000Driver {
-    fn handle_rx_irq(dev: &net::Device, napi: &Napi, data: &NetData) {  
+    fn handle_rx_irq(dev: &net::Device, napi: &Napi, data: &NetData) {
         // Exercise4 Checkpoint 1
+        let mut packets = 0;
+        let mut bytes = 0;
+        let recv_vec: Option<Vec<Vec<u8>>> = {
+            let mut dev_e1k = data.dev_e1000.lock();
+            dev_e1k.as_mut().unwrap().e1000_recv()
+        };
+        if let Some(vec) = recv_vec {
+            packets = vec.len();
+            vec.into_iter().for_each(|packet| {
+                let mut len = packet.len();
+                let skb = dev.alloc_skb_ip_align(RXBUFFER).unwrap();
+                let skb_buf =
+                    unsafe { from_raw_parts_mut(skb.head_data().as_ptr() as *mut u8, len) };
+                skb_buf.copy_from_slice(&packet);
+
+                skb.put(len as u32);
+                let protocol = skb.eth_type_trans(dev);
+                skb.protocol_set(protocol);
+
+                napi.gro_receive(&skb);
+
+                bytes += len;
+            });
+            pr_info!("handle_rx_irq {} packets, {} bytes\n", packets, bytes);
+        } else {
+            pr_info!("handle_rx_irq no packets\n");
+        }
+
+        data.stats
+            .rx_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        data.stats
+            .rx_packets
+            .fetch_add(packets as u64, Ordering::Relaxed);
     }
 
     fn handle_tx_irq() {
@@ -102,6 +139,7 @@ impl irq::Handler for E1000Driver {
         }; */
         let intr = unsafe {
             let ptr = data.res.ptr.wrapping_add(0xc0); // ICR
+                                                       // let ptr = data.res.wrapping_add(0xc0); // ICR
             bindings::readl(ptr as _)
         };
 
@@ -223,6 +261,7 @@ impl net::DeviceOperations for E1000Driver {
             alloc_coherent: Vec::new(),
         };
         let regs = data.res.ptr;
+        // let regs = *data.res;
         let mut e1000_device = E1000Device::<Kernfn<u8>>::new(kfn, regs).unwrap();
 
         pr_info!("e1000 device is initialized\n");
@@ -231,13 +270,20 @@ impl net::DeviceOperations for E1000Driver {
             *dev_e1k = Some(e1000_device);
         }
 
-
         // Exercise3 Checkpoint 5
         // Enable interrupts
         // step1 set up irq_data
         // step2 request_irq
         // step3 set up irq_handler
-
+        let irq_data = Box::try_new(IrqData {
+            dev_e1000: data.dev_e1000.clone(),
+            res: data.res.clone(),
+            napi: data.napi.clone(),
+        })?;
+        let irq_regist = request_irq(data.irq, irq_data)?;
+        data.irq_handler
+            .store(Box::into_raw(Box::try_new(irq_regist)?), Ordering::Relaxed);
+        // *data.irq_handler.get_mut() = Some(request_irq(data.irq, irq_regist)?);
 
         // Enable NAPI scheduling
         data.napi.enable();
@@ -276,6 +322,30 @@ impl net::DeviceOperations for E1000Driver {
     ) -> NetdevTx {
         pr_info!("start xmit\n");
         // Exercise4 Checkpoint 2
+        skb.put_padto(bindings::ETH_ZLEN);
+        let skb_data = skb.len() - skb.data_len();
+        let skb_data = skb.head_data();
+        dev.sent_queue(skb.len());
+
+        let mut dev_e1k = data.dev_e1000.lock_irqdisable();
+        let len = dev_e1k.as_mut().unwrap().e1000_transmit(skb_data);
+        drop(dev_e1k);
+        if len < 0 {
+            pr_warn!("skb packet:{}", len);
+            return net::NetdevTx::Busy;
+        }
+        let bytes = skb.len();
+        let packets = 1;
+
+        skb.napi_consume(64);
+        data.stats
+            .tx_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+
+        data.stats.tx_packets.fetch_add(packets, Ordering::Relaxed);
+        dev.completed_queue(packets as u32, bytes as u32);
+
+        return net::NetdevTx::Ok;
     }
 
     /// Corresponds to `ndo_get_stats64` in `struct net_device_ops`.
@@ -344,7 +414,9 @@ impl pci::Driver for E1000Driver {
         let mut dev_e1000 = Pin::from(Box::try_new(unsafe { SpinLock::new(None) })?);
         spinlock_init!(dev_e1000.as_mut(), "e1000_device");
         */
+        // let mut lock_e1000 = unsafe { SpinLock::new(None,"e1000_device","e1000_device") };
         let mut lock_e1000 = unsafe { SpinLock::new(None) };
+        // unsafe { SpinLock::from(lock_e1000) };
         spinlock_init!(
             unsafe { Pin::new_unchecked(&mut lock_e1000) },
             "e1000_device"

@@ -82,9 +82,10 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
 
         // Exercise3 Checkpoint 1
         // 分配tx_ring和rx_ring的内存空间并返回dma虚拟地址和物理地址
-        // let (tx_ring_vaddr, tx_ring_dma) = ?
-        // let (rx_ring_vaddr, rx_ring_dma) = ?
-
+        
+        let (tx_ring_vaddr, tx_ring_dma) = kfn.dma_alloc_coherent(alloc_tx_ring_pages);
+        let (rx_ring_vaddr, rx_ring_dma) = kfn.dma_alloc_coherent(alloc_rx_ring_pages);
+        
 
         let tx_ring = unsafe { from_raw_parts_mut(tx_ring_vaddr as *mut TxDesc, TX_RING_SIZE) };
         let rx_ring = unsafe { from_raw_parts_mut(rx_ring_vaddr as *mut RxDesc, RX_RING_SIZE) };
@@ -115,8 +116,8 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
 
         // Exercise3 Checkpoint 2
         // 分配tx_buffer和rx_buffer的内存空间 并返回dma虚拟地址和物理地址
-        // let (mut tx_mbufs_vaddr, mut tx_mbufs_dma) = ?;
-        // let (mut rx_mbufs_vaddr, mut rx_mbufs_dma) = ?;
+        let (mut tx_mbufs_vaddr, mut tx_mbufs_dma) = kfn.dma_alloc_coherent(alloc_tx_buffer_pages);
+        let (mut rx_mbufs_vaddr, mut rx_mbufs_dma) = kfn.dma_alloc_coherent(alloc_rx_buffer_pages);
 
         
 
@@ -207,8 +208,8 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
 
         // Exercise3 Checkpoint 3
         // set tx descriptor base address and tx ring length
-        // self.regs[??].write(??);
-        // self.regs[??].write(??);
+        self.regs[E1000_TDBAL].write(self.tx_ring_dma as u32);
+        self.regs[E1000_TDLEN].write((self.tx_ring.len() * size_of::<TxDesc>()) as u32);
 
 
 
@@ -223,8 +224,8 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
 
         // Exercise3 Checkpoint 4
         // set rx descriptor base address and rx ring length
-        // self.regs[??].write(??);
-        // self.regs[??].write(??);
+        self.regs[E1000_RDBAL].write(self.rx_ring_dma as u32);
+        self.regs[E1000_RDLEN].write((self.rx_ring.len() * size_of::<RxDesc>()) as u32);
 
         self.regs[E1000_RDH].write(0);
         self.regs[E1000_RDT].write((RX_RING_SIZE - 1) as u32);
